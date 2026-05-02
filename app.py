@@ -4,284 +4,255 @@ from datetime import datetime
 from dateutil.relativedelta import relativedelta
 import os
 import plotly.graph_objects as go
-
-st.set_page_config(layout="wide")
-
+ 
+st.set_page_config(layout="wide", page_title="ОВДП Портфель")
+ 
 DATA_FILE = "portfolio.json"
-TODAY = datetime.today()
-
+TODAY = datetime.today().replace(hour=0, minute=0, second=0, microsecond=0)
+ 
 # -------------------------
 # LOAD / SAVE
 # -------------------------
 def load_data():
     if os.path.exists(DATA_FILE):
-        df = pd.read_json(DATA_FILE)
-        for col in ["date1","date2","maturity"]:
-            df[col] = pd.to_datetime(df[col], errors="coerce")
-        return df
+        try:
+            df = pd.read_json(DATA_FILE)
+            for col in ["date1", "date2", "maturity"]:
+                if col in df.columns:
+                    df[col] = pd.to_datetime(df[col], errors="coerce")
+            return df
+        except Exception:
+            pass
     return pd.DataFrame(columns=[
-        "name","quantity","coupon","date1","date2","maturity","nominal"
+        "name", "quantity", "coupon", "date1", "date2", "maturity", "nominal"
     ])
-
+ 
 def save_data(df):
-    df.to_json(DATA_FILE)
-
-portfolio = load_data()
-
+    df_copy = df.copy()
+    df_copy.to_json(DATA_FILE, date_format="iso")
+ 
+if "portfolio" not in st.session_state:
+    st.session_state.portfolio = load_data()
+ 
 # -------------------------
-# SIDEBAR
+# COUPON GENERATION
+# -------------------------
+def generate_coupon_schedule(row):
+    """
+    Generates all coupon payment dates between date1 and maturity
+    with monthly step from date2 as the cycle anchor.
+    Returns list of (payment_date, amount) tuples.
+    """
+    payments = []
+    try:
+        d1 = pd.Timestamp(row["date1"])
+        d2 = pd.Timestamp(row["date2"])
+        mat = pd.Timestamp(row["maturity"])
+        nominal = float(row["nominal"])
+        coupon_rate = float(row["coupon"])
+        qty = int(row["quantity"])
+ 
+        if pd.isna(d1) or pd.isna(d2) or pd.isna(mat):
+            return payments
+ 
+        # Calculate period length in months (d1 → d2)
+        months_diff = (d2.year - d1.year) * 12 + (d2.month - d1.month)
+        if months_diff <= 0:
+            months_diff = 1  # fallback: monthly
+ 
+        # Coupon amount per payment
+        periods_per_year = 12 / months_diff
+        coupon_amount = nominal * (coupon_rate / 100) / periods_per_year * qty
+ 
+        # Walk from d2 forward by months_diff until maturity
+        current = d2
+        while current <= mat:
+            payments.append((current, round(coupon_amount, 2)))
+            current = current + relativedelta(months=months_diff)
+ 
+        # Final principal repayment
+        payments.append((mat, round(nominal * qty, 2)))
+ 
+    except Exception:
+        pass
+    return payments
+ 
+# -------------------------
+# SIDEBAR — ADD BOND
 # -------------------------
 st.sidebar.header("➕ Додати ОВДП")
-
-name = st.sidebar.text_input("Назва")
-qty = st.sidebar.number_input("Кількість", 0)
-coupon = st.sidebar.number_input("Купон", 0.0)
-d1 = st.sidebar.date_input("Дата 1")
-d2 = st.sidebar.date_input("Дата 2")
-mat = st.sidebar.date_input("Погашення")
-nominal = st.sidebar.number_input("Номінал", 1000)
-
-if st.sidebar.button("Додати"):
+ 
+with st.sidebar.form("add_form", clear_on_submit=True):
+    name    = st.text_input("Назва")
+    qty     = st.number_input("Кількість", min_value=0, step=1, value=1)
+    coupon  = st.number_input("Купон (%)", min_value=0.0, step=0.1, value=0.0)
+    d1      = st.date_input("Дата початку купону")
+    d2      = st.date_input("Дата першого купону")
+    mat     = st.date_input("Погашення")
+    nominal = st.number_input("Номінал", min_value=1, value=1000)
+    submitted = st.form_submit_button("Додати")
+ 
+if submitted and name:
     new = pd.DataFrame([{
-        "name": name,
+        "name":     name,
         "quantity": qty,
-        "coupon": coupon,
-        "date1": pd.to_datetime(d1),
-        "date2": pd.to_datetime(d2),
+        "coupon":   coupon,
+        "date1":    pd.to_datetime(d1),
+        "date2":    pd.to_datetime(d2),
         "maturity": pd.to_datetime(mat),
-        "nominal": nominal
+        "nominal":  nominal,
     }])
-    portfolio = pd.concat([portfolio, new], ignore_index=True)
-    save_data(portfolio)
-
+    st.session_state.portfolio = pd.concat(
+        [st.session_state.portfolio, new], ignore_index=True
+    )
+    save_data(st.session_state.portfolio)
+    st.sidebar.success(f"Додано: {name}")
+ 
 # -------------------------
-# IMPORT
+# SIDEBAR — IMPORT EXCEL
 # -------------------------
-file = st.sidebar.file_uploader("📥 Імпорт Excel")
-
+st.sidebar.markdown("---")
+file = st.sidebar.file_uploader("📥 Імпорт Excel", type=["xlsx", "xls"])
 if file:
-    df = pd.read_excel(file)
-    for col in ["date1","date2","maturity"]:
-        df[col] = pd.to_datetime(df[col], errors="coerce")
-    portfolio = df
-    save_data(portfolio)
-
+    try:
+        df_imp = pd.read_excel(file)
+        for col in ["date1", "date2", "maturity"]:
+            if col in df_imp.columns:
+                df_imp[col] = pd.to_datetime(df_imp[col], errors="coerce")
+        st.session_state.portfolio = df_imp
+        save_data(st.session_state.portfolio)
+        st.sidebar.success("Імпорт успішний")
+    except Exception as e:
+        st.sidebar.error(f"Помилка імпорту: {e}")
+ 
+# -------------------------
+# SIDEBAR — DELETE BOND
+# -------------------------
+portfolio = st.session_state.portfolio
+ 
+if not portfolio.empty:
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🗑️ Видалити")
+    del_name = st.sidebar.selectbox("Оберіть ОВДП", portfolio["name"].tolist())
+    if st.sidebar.button("Видалити"):
+        idx = portfolio[portfolio["name"] == del_name].index
+        if not idx.empty:
+            st.session_state.portfolio = portfolio.drop(idx[0]).reset_index(drop=True)
+            save_data(st.session_state.portfolio)
+            st.rerun()
+ 
+# -------------------------
+# MAIN — GUARD
+# -------------------------
+portfolio = st.session_state.portfolio
+ 
 if portfolio.empty:
-    st.warning("Додай ОВДП")
+    st.warning("Портфель порожній. Додай ОВДП через панель зліва.")
     st.stop()
-
+ 
 # -------------------------
-# GENERATE (без дублювань)
+# BUILD CASH FLOW TABLE
 # -------------------------
-def generate(df):
-    events = []
-
-    for _, b in df.iterrows():
-
-        if pd.isna(b["maturity"]) or pd.isna(b["date1"]):
-            continue
-
-        maturity = b["maturity"]
-
-        # 🔴 CASE 1: тільки 1 дата (останній купон)
-        if pd.isna(b["date2"]):
-
-            d = b["date1"]
-
-            if d >= TODAY:
-                events.append({
-                    "date": d,
-                    "name": b["name"],
-                    "type": "coupon",
-                    "amount": b["coupon"] * b["quantity"],
-                    "principal": 0
-                })
-
-            if maturity >= TODAY:
-                events.append({
-                    "date": maturity,
-                    "name": b["name"],
-                    "type": "maturity",
-                    "amount": 0,
-                    "principal": b["nominal"] * b["quantity"]
-                })
-
-        # 🟢 CASE 2: 2 дати
-        else:
-
-            starts = sorted([b["date1"], b["date2"]])
-
-            for start in starts:
-
-                d = start
-
-                while d <= maturity:
-
-                    if d >= TODAY:
-
-                        # ❗ НЕ ДУБЛЮЄМО maturity
-                        if d == maturity and start != starts[0]:
-                            break
-
-                        events.append({
-                            "date": d,
-                            "name": b["name"],
-                            "type": "coupon",
-                            "amount": b["coupon"] * b["quantity"],
-                            "principal": 0
-                        })
-
-                        if d == maturity:
-                            events.append({
-                                "date": d,
-                                "name": b["name"],
-                                "type": "maturity",
-                                "amount": 0,
-                                "principal": b["nominal"] * b["quantity"]
-                            })
-
-                    d += relativedelta(months=6)
-
-    df_events = pd.DataFrame(events)
-
-    # -------------------------
-    # ❗ КЛЮЧ: дедуплікація по місяцю
-    # -------------------------
-    df_events["month"] = df_events["date"].dt.to_period("M")
-
-    # якщо 2 купони однієї ОВДП в одному місяці → зливаємо
-    df_events = (
-        df_events
-        .groupby(["name","type","month"], as_index=False)
-        .agg({
-            "date": "min",
-            "amount": "sum",
-            "principal": "sum"
+all_payments = []
+for _, row in portfolio.iterrows():
+    schedule = generate_coupon_schedule(row)
+    for pay_date, amount in schedule:
+        is_principal = (pay_date == pd.Timestamp(row["maturity"])) and (amount == row["nominal"] * row["quantity"])
+        all_payments.append({
+            "bond":      row["name"],
+            "date":      pay_date,
+            "amount":    amount,
+            "type":      "Погашення" if is_principal else "Купон",
+            "past":      pay_date < pd.Timestamp(TODAY),
         })
-    )
-
-    return df_events
-
-
-events = generate(portfolio)
-
-if events.empty:
-    st.warning("Немає майбутніх виплат")
+ 
+df_cf = pd.DataFrame(all_payments)
+ 
+if df_cf.empty:
+    st.info("Немає грошових потоків — перевір дати ОВДП.")
     st.stop()
-
+ 
+df_future = df_cf[~df_cf["past"]].copy()
+df_past   = df_cf[df_cf["past"]].copy()
+ 
 # -------------------------
-# SPLIT
+# METRICS
 # -------------------------
-income = events[events["type"] == "coupon"]
-principal = events[events["type"] == "maturity"]
-
-monthly_income = income.groupby("month")["amount"].sum().reset_index()
-
+st.title("📊 ОВДП Портфель")
+ 
+total_invested = (portfolio["nominal"] * portfolio["quantity"]).sum()
+total_future   = df_future["amount"].sum() if not df_future.empty else 0
+total_received = df_past["amount"].sum() if not df_past.empty else 0
+next_payment   = df_future["date"].min() if not df_future.empty else None
+ 
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("💰 Інвестовано", f"{total_invested:,.0f} ₴")
+col2.metric("📈 Майбутні виплати", f"{total_future:,.0f} ₴")
+col3.metric("✅ Отримано", f"{total_received:,.0f} ₴")
+col4.metric("📅 Наступна виплата", next_payment.strftime("%d.%m.%Y") if next_payment else "—")
+ 
+st.markdown("---")
+ 
 # -------------------------
-# KPI
+# CHART — Monthly Cash Flow
 # -------------------------
-st.title("💼 ОВДП Dashboard")
-
-total = (portfolio["nominal"] * portfolio["quantity"]).sum()
-annual = monthly_income["amount"].sum()
-avg = annual / 12
-
-# ризик погашення
-six_months = TODAY + relativedelta(months=6)
-twelve_months = TODAY + relativedelta(months=12)
-
-maturing_6 = portfolio[
-    (portfolio["maturity"] >= TODAY) &
-    (portfolio["maturity"] <= six_months)
-]
-
-maturing_12 = portfolio[
-    (portfolio["maturity"] >= TODAY) &
-    (portfolio["maturity"] <= twelve_months)
-]
-
-sum_6 = (maturing_6["nominal"] * maturing_6["quantity"]).sum()
-sum_12 = (maturing_12["nominal"] * maturing_12["quantity"]).sum()
-
-pct_6 = (sum_6 / total * 100) if total else 0
-pct_12 = (sum_12 / total * 100) if total else 0
-
-c1,c2,c3,c4,c5 = st.columns(5)
-c1.metric("Портфель", f"{total:,.0f} ₴")
-c2.metric("Річний дохід", f"{annual:,.0f} ₴")
-c3.metric("Сер. місяць", f"{avg:,.0f} ₴")
-c4.metric("⏳ Погашення 6м", f"{pct_6:.1f}%")
-c5.metric("⏳ Погашення 12м", f"{pct_12:.1f}%")
-
+df_chart = (
+    df_future.groupby(pd.Grouper(key="date", freq="ME"))["amount"]
+    .sum()
+    .reset_index()
+)
+df_chart.columns = ["Місяць", "Сума"]
+ 
+fig = go.Figure()
+fig.add_bar(
+    x=df_chart["Місяць"],
+    y=df_chart["Сума"],
+    marker_color="#2563eb",
+    name="Виплати",
+)
+fig.update_layout(
+    title="Майбутні грошові потоки по місяцях",
+    xaxis_title="Місяць",
+    yaxis_title="Сума (₴)",
+    plot_bgcolor="white",
+    paper_bgcolor="white",
+    hovermode="x unified",
+)
+st.plotly_chart(fig, use_container_width=True)
+ 
 # -------------------------
-# VIEW
+# CHART — By bond (pie)
 # -------------------------
-view = st.radio("Режим",
-    ["📈 Дохід", "📊 Провали", "📅 Виплати", "💼 Портфель"],
-    horizontal=True)
-
-# -------------------------
-# 📈 ГРАФІК З ТОЧКАМИ ПОГАШЕННЯ
-# -------------------------
-if view == "📈 Дохід":
-
-    fig = go.Figure()
-
-    # лінія доходу
-    fig.add_trace(go.Scatter(
-        x=monthly_income["month"].astype(str),
-        y=monthly_income["amount"],
-        mode='lines+markers',
-        name="Купони"
+col_pie, col_tbl = st.columns([1, 2])
+ 
+with col_pie:
+    bond_totals = df_future.groupby("bond")["amount"].sum().reset_index()
+    fig2 = go.Figure(go.Pie(
+        labels=bond_totals["bond"],
+        values=bond_totals["amount"],
+        hole=0.4,
     ))
-
-    # точки погашення
-    if not principal.empty:
-        fig.add_trace(go.Scatter(
-            x=principal["month"].astype(str),
-            y=principal["principal"],
-            mode='markers',
-            name="Погашення",
-            marker=dict(size=10)
-        ))
-
-    st.plotly_chart(fig, use_container_width=True)
-
+    fig2.update_layout(title="Структура виплат по ОВДП")
+    st.plotly_chart(fig2, use_container_width=True)
+ 
+with col_tbl:
+    st.subheader("📋 Майбутні виплати")
+    display = df_future[["date","bond","type","amount"]].copy()
+    display["date"] = display["date"].dt.strftime("%d.%m.%Y")
+    display.columns = ["Дата","ОВДП","Тип","Сума (₴)"]
+    display = display.sort_values("Дата").reset_index(drop=True)
+    st.dataframe(display, use_container_width=True, height=350)
+ 
 # -------------------------
-# 📊 ПРОВАЛИ
+# PORTFOLIO TABLE
 # -------------------------
-elif view == "📊 Провали":
-
-    all_months = pd.period_range(
-        start=events["month"].min(),
-        end=events["month"].max(),
-        freq="M"
-    )
-
-    gap_df = pd.DataFrame({"month": all_months.astype(str)})
-    gap_df = gap_df.merge(monthly_income, on="month", how="left")
-    gap_df["amount"] = gap_df["amount"].fillna(0)
-
-    st.bar_chart(gap_df.set_index("month"))
-
-# -------------------------
-# 📅 ВИПЛАТИ
-# -------------------------
-elif view == "📅 Виплати":
-    st.dataframe(events.sort_values("date"))
-
-# -------------------------
-# 💼 ПОРТФЕЛЬ
-# -------------------------
-elif view == "💼 Портфель":
-
-    edited = st.data_editor(portfolio, num_rows="dynamic")
-
-    if st.button("💾 Зберегти"):
-        save_data(edited)
-
-    to_delete = st.selectbox("Видалити", portfolio["name"])
-
-    if st.button("❌ Видалити"):
-        portfolio = portfolio[portfolio["name"] != to_delete]
-        save_data(portfolio)
+st.markdown("---")
+st.subheader("📁 Позиції портфеля")
+port_display = portfolio.copy()
+for col in ["date1","date2","maturity"]:
+    if col in port_display.columns:
+        port_display[col] = port_display[col].dt.strftime("%d.%m.%Y")
+port_display["Вартість"] = portfolio["nominal"] * portfolio["quantity"]
+port_display.columns = ["Назва","Кількість","Купон (%)","Дата 1","Дата 2","Погашення","Номінал","Вартість (₴)"]
+st.dataframe(port_display, use_container_width=True)
+ 
