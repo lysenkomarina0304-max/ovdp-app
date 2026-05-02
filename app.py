@@ -28,7 +28,7 @@ def save_data(df):
 portfolio = load_data()
 
 # -------------------------
-# ADD BOND
+# ADD
 # -------------------------
 st.sidebar.header("➕ Додати ОВДП")
 
@@ -52,13 +52,11 @@ if st.sidebar.button("Додати"):
     }])
     portfolio = pd.concat([portfolio, new], ignore_index=True)
     save_data(portfolio)
-    st.sidebar.success("Додано")
 
 # -------------------------
-# IMPORT EXCEL
+# IMPORT
 # -------------------------
-st.sidebar.header("📥 Імпорт Excel")
-file = st.sidebar.file_uploader("Завантаж Excel")
+file = st.sidebar.file_uploader("📥 Імпорт Excel")
 
 if file:
     df = pd.read_excel(file)
@@ -66,17 +64,16 @@ if file:
         df[col] = pd.to_datetime(df[col], errors="coerce")
     portfolio = df
     save_data(portfolio)
-    st.sidebar.success("Імпортовано")
 
 # -------------------------
 # VALIDATION
 # -------------------------
 if portfolio.empty:
-    st.warning("Додай ОВДП в портфель")
+    st.warning("Додай ОВДП")
     st.stop()
 
 # -------------------------
-# CASHFLOW ENGINE
+# GENERATE
 # -------------------------
 def generate(df):
     events = []
@@ -86,21 +83,32 @@ def generate(df):
             continue
 
         maturity = b["maturity"]
+
         for start in [b["date1"], b["date2"]]:
             d = start
 
             while d <= maturity:
+
                 if d >= TODAY:
-                    amount = b["coupon"] * b["quantity"]
 
-                    if d == maturity:
-                        amount += b["nominal"] * b["quantity"]
-
+                    # купон
                     events.append({
                         "date": d,
                         "name": b["name"],
-                        "amount": amount
+                        "type": "coupon",
+                        "amount": b["coupon"] * b["quantity"],
+                        "principal": 0
                     })
+
+                    # погашення
+                    if d == maturity:
+                        events.append({
+                            "date": d,
+                            "name": b["name"],
+                            "type": "maturity",
+                            "amount": 0,
+                            "principal": b["nominal"] * b["quantity"]
+                        })
 
                 d += relativedelta(months=6)
 
@@ -112,24 +120,28 @@ if events.empty:
     st.warning("Немає майбутніх виплат")
     st.stop()
 
-events["year"] = events["date"].dt.year
-events["month"] = events["date"].dt.strftime("%m.%Y")
+events["month"] = events["date"].dt.to_period("M").astype(str)
 
 # -------------------------
-# FILTERS
+# SPLIT
 # -------------------------
-bond_filter = st.selectbox("📊 Обрати ОВДП", ["Всі"] + sorted(portfolio["name"].unique()))
-year_filter = st.selectbox("📅 Рік", ["Всі"] + sorted(events["year"].unique()))
+income = events[events["type"] == "coupon"]
+principal = events[events["type"] == "maturity"]
 
-filtered = events.copy()
+monthly_income = income.groupby("month")["amount"].sum().reset_index()
 
-if bond_filter != "Всі":
-    filtered = filtered[filtered["name"] == bond_filter]
+# -------------------------
+# GAP GRAPH (важливо)
+# -------------------------
+all_months = pd.date_range(
+    start=events["date"].min(),
+    end=events["date"].max(),
+    freq="MS"
+).to_period("M").astype(str)
 
-if year_filter != "Всі":
-    filtered = filtered[filtered["year"] == year_filter]
-
-monthly = filtered.groupby("month")["amount"].sum().reset_index()
+gap_df = pd.DataFrame({"month": all_months})
+gap_df = gap_df.merge(monthly_income, on="month", how="left")
+gap_df["amount"] = gap_df["amount"].fillna(0)
 
 # -------------------------
 # KPI
@@ -137,60 +149,51 @@ monthly = filtered.groupby("month")["amount"].sum().reset_index()
 st.title("💼 ОВДП Dashboard")
 
 total = (portfolio["nominal"] * portfolio["quantity"]).sum()
-annual = monthly["amount"].sum()
+annual = monthly_income["amount"].sum()
 avg = annual / 12
 
-col1, col2, col3 = st.columns(3)
-col1.metric("Портфель", f"{total:,.0f} ₴")
-col2.metric("Річний дохід", f"{annual:,.0f} ₴")
-col3.metric("Сер. місяць", f"{avg:,.0f} ₴")
-
-next_payment = events.sort_values("date").iloc[0]
-st.info(f"📅 Наступна виплата: {next_payment['date'].date()} → {next_payment['amount']:,.0f} ₴")
+c1,c2,c3 = st.columns(3)
+c1.metric("Портфель", f"{total:,.0f} ₴")
+c2.metric("Річний дохід", f"{annual:,.0f} ₴")
+c3.metric("Сер. місяць", f"{avg:,.0f} ₴")
 
 # -------------------------
-# VIEW SWITCH
+# VIEW
 # -------------------------
-view = st.radio(
-    "Режим",
-    ["📈 Графік", "📅 Виплати", "💼 Портфель"],
-    horizontal=True
-)
+view = st.radio("Режим",
+    ["📈 Дохід", "📊 Провали", "📅 Виплати", "💼 Портфель"],
+    horizontal=True)
 
 # -------------------------
-# GRAPH
+# GRAPH 1 (дохід)
 # -------------------------
-if view == "📈 Графік":
-    st.line_chart(monthly.set_index("month"))
+if view == "📈 Дохід":
+    st.line_chart(monthly_income.set_index("month"))
 
 # -------------------------
-# EVENTS TABLE
+# GRAPH 2 (провали)
+# -------------------------
+elif view == "📊 Провали":
+    st.bar_chart(gap_df.set_index("month"))
+
+# -------------------------
+# EVENTS
 # -------------------------
 elif view == "📅 Виплати":
-    st.dataframe(filtered.sort_values("date"))
+    st.dataframe(events.sort_values("date"))
 
 # -------------------------
-# PORTFOLIO TABLE (EDIT + DELETE)
+# PORTFOLIO
 # -------------------------
 elif view == "💼 Портфель":
 
-    st.subheader("Редагування портфеля")
+    edited = st.data_editor(portfolio, num_rows="dynamic")
 
-    edited = st.data_editor(
-        portfolio,
-        num_rows="dynamic",
-        use_container_width=True
-    )
-
-    if st.button("💾 Зберегти зміни"):
+    if st.button("💾 Зберегти"):
         save_data(edited)
-        st.success("Збережено")
 
-    st.subheader("Видалення")
-
-    to_delete = st.selectbox("Обери ОВДП", portfolio["name"])
+    to_delete = st.selectbox("Видалити", portfolio["name"])
 
     if st.button("❌ Видалити"):
         portfolio = portfolio[portfolio["name"] != to_delete]
         save_data(portfolio)
-        st.warning("Видалено")
