@@ -3,6 +3,7 @@ import pandas as pd
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 import os
+import plotly.graph_objects as go
 
 st.set_page_config(layout="wide")
 
@@ -70,7 +71,7 @@ if portfolio.empty:
     st.stop()
 
 # -------------------------
-# GENERATE
+# GENERATE (без дублювань)
 # -------------------------
 def generate(df):
     events = []
@@ -82,7 +83,7 @@ def generate(df):
 
         maturity = b["maturity"]
 
-        # 🔶 КЕЙС 1: тільки 1 дата
+        # 🔴 CASE 1: тільки 1 дата (останній купон)
         if pd.isna(b["date2"]):
 
             d = b["date1"]
@@ -105,18 +106,12 @@ def generate(df):
                     "principal": b["nominal"] * b["quantity"]
                 })
 
-        # 🔶 КЕЙС 2: 2 дати
+        # 🟢 CASE 2: 2 дати
         else:
 
-            dates = []
+            starts = sorted([b["date1"], b["date2"]])
 
-            if pd.notna(b["date1"]):
-                dates.append(b["date1"])
-
-            if pd.notna(b["date2"]) and b["date2"] != b["date1"]:
-                dates.append(b["date2"])
-
-            for start in dates:
+            for start in starts:
 
                 d = start
 
@@ -124,7 +119,8 @@ def generate(df):
 
                     if d >= TODAY:
 
-                        if d == maturity and start != min(dates):
+                        # ❗ НЕ ДУБЛЮЄМО maturity
+                        if d == maturity and start != starts[0]:
                             break
 
                         events.append({
@@ -146,15 +142,32 @@ def generate(df):
 
                     d += relativedelta(months=6)
 
-    return pd.DataFrame(events)
+    df_events = pd.DataFrame(events)
+
+    # -------------------------
+    # ❗ КЛЮЧ: дедуплікація по місяцю
+    # -------------------------
+    df_events["month"] = df_events["date"].dt.to_period("M")
+
+    # якщо 2 купони однієї ОВДП в одному місяці → зливаємо
+    df_events = (
+        df_events
+        .groupby(["name","type","month"], as_index=False)
+        .agg({
+            "date": "min",
+            "amount": "sum",
+            "principal": "sum"
+        })
+    )
+
+    return df_events
+
 
 events = generate(portfolio)
 
 if events.empty:
     st.warning("Немає майбутніх виплат")
     st.stop()
-
-events["month"] = events["date"].dt.to_period("M").astype(str)
 
 # -------------------------
 # SPLIT
@@ -165,19 +178,6 @@ principal = events[events["type"] == "maturity"]
 monthly_income = income.groupby("month")["amount"].sum().reset_index()
 
 # -------------------------
-# GAP GRAPH
-# -------------------------
-all_months = pd.date_range(
-    start=events["date"].min(),
-    end=events["date"].max(),
-    freq="MS"
-).to_period("M").astype(str)
-
-gap_df = pd.DataFrame({"month": all_months})
-gap_df = gap_df.merge(monthly_income, on="month", how="left")
-gap_df["amount"] = gap_df["amount"].fillna(0)
-
-# -------------------------
 # KPI
 # -------------------------
 st.title("💼 ОВДП Dashboard")
@@ -186,7 +186,7 @@ total = (portfolio["nominal"] * portfolio["quantity"]).sum()
 annual = monthly_income["amount"].sum()
 avg = annual / 12
 
-# 🔥 НОВИЙ KPI
+# ризик погашення
 six_months = TODAY + relativedelta(months=6)
 twelve_months = TODAY + relativedelta(months=12)
 
@@ -207,7 +207,6 @@ pct_6 = (sum_6 / total * 100) if total else 0
 pct_12 = (sum_12 / total * 100) if total else 0
 
 c1,c2,c3,c4,c5 = st.columns(5)
-
 c1.metric("Портфель", f"{total:,.0f} ₴")
 c2.metric("Річний дохід", f"{annual:,.0f} ₴")
 c3.metric("Сер. місяць", f"{avg:,.0f} ₴")
@@ -221,15 +220,59 @@ view = st.radio("Режим",
     ["📈 Дохід", "📊 Провали", "📅 Виплати", "💼 Портфель"],
     horizontal=True)
 
+# -------------------------
+# 📈 ГРАФІК З ТОЧКАМИ ПОГАШЕННЯ
+# -------------------------
 if view == "📈 Дохід":
-    st.line_chart(monthly_income.set_index("month"))
 
+    fig = go.Figure()
+
+    # лінія доходу
+    fig.add_trace(go.Scatter(
+        x=monthly_income["month"].astype(str),
+        y=monthly_income["amount"],
+        mode='lines+markers',
+        name="Купони"
+    ))
+
+    # точки погашення
+    if not principal.empty:
+        fig.add_trace(go.Scatter(
+            x=principal["month"].astype(str),
+            y=principal["principal"],
+            mode='markers',
+            name="Погашення",
+            marker=dict(size=10)
+        ))
+
+    st.plotly_chart(fig, use_container_width=True)
+
+# -------------------------
+# 📊 ПРОВАЛИ
+# -------------------------
 elif view == "📊 Провали":
+
+    all_months = pd.period_range(
+        start=events["month"].min(),
+        end=events["month"].max(),
+        freq="M"
+    )
+
+    gap_df = pd.DataFrame({"month": all_months.astype(str)})
+    gap_df = gap_df.merge(monthly_income, on="month", how="left")
+    gap_df["amount"] = gap_df["amount"].fillna(0)
+
     st.bar_chart(gap_df.set_index("month"))
 
+# -------------------------
+# 📅 ВИПЛАТИ
+# -------------------------
 elif view == "📅 Виплати":
     st.dataframe(events.sort_values("date"))
 
+# -------------------------
+# 💼 ПОРТФЕЛЬ
+# -------------------------
 elif view == "💼 Портфель":
 
     edited = st.data_editor(portfolio, num_rows="dynamic")
