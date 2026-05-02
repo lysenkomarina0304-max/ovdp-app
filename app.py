@@ -15,6 +15,8 @@ TODAY = datetime.today()
 def load_data():
     if os.path.exists(DATA_FILE):
         df = pd.read_json(DATA_FILE)
+        for col in ["date1","date2","maturity"]:
+            df[col] = pd.to_datetime(df[col], errors="coerce")
         return df
     return pd.DataFrame(columns=[
         "name","quantity","coupon","date1","date2","maturity","nominal"
@@ -26,7 +28,7 @@ def save_data(df):
 portfolio = load_data()
 
 # -------------------------
-# SIDEBAR: ADD BOND
+# ADD BOND
 # -------------------------
 st.sidebar.header("➕ Додати ОВДП")
 
@@ -56,16 +58,12 @@ if st.sidebar.button("Додати"):
 # IMPORT EXCEL
 # -------------------------
 st.sidebar.header("📥 Імпорт Excel")
-
 file = st.sidebar.file_uploader("Завантаж Excel")
 
 if file:
     df = pd.read_excel(file)
-    
-    # Переконуємось що дати — datetime
     for col in ["date1","date2","maturity"]:
         df[col] = pd.to_datetime(df[col], errors="coerce")
-    
     portfolio = df
     save_data(portfolio)
     st.sidebar.success("Імпортовано")
@@ -84,20 +82,14 @@ def generate(df):
     events = []
 
     for _, b in df.iterrows():
-
-        # пропускаємо криві дані
         if pd.isna(b["maturity"]) or pd.isna(b["date1"]) or pd.isna(b["date2"]):
             continue
 
-        maturity = pd.to_datetime(b["maturity"])
-        d1 = pd.to_datetime(b["date1"])
-        d2 = pd.to_datetime(b["date2"])
-
-        for start in [d1, d2]:
+        maturity = b["maturity"]
+        for start in [b["date1"], b["date2"]]:
             d = start
 
             while d <= maturity:
-
                 if d >= TODAY:
                     amount = b["coupon"] * b["quantity"]
 
@@ -120,23 +112,23 @@ if events.empty:
     st.warning("Немає майбутніх виплат")
     st.stop()
 
-# -------------------------
-# PREP DATA
-# -------------------------
 events["year"] = events["date"].dt.year
 events["month"] = events["date"].dt.strftime("%m.%Y")
 
 # -------------------------
-# YEAR FILTER
+# FILTERS
 # -------------------------
-years = sorted(events["year"].unique())
-year_filter = st.selectbox("📅 Обрати рік", ["Всі"] + years)
+bond_filter = st.selectbox("📊 Обрати ОВДП", ["Всі"] + sorted(portfolio["name"].unique()))
+year_filter = st.selectbox("📅 Рік", ["Всі"] + sorted(events["year"].unique()))
 
-filtered = events if year_filter == "Всі" else events[events["year"] == year_filter]
+filtered = events.copy()
 
-# -------------------------
-# MONTHLY AGGREGATION
-# -------------------------
+if bond_filter != "Всі":
+    filtered = filtered[filtered["name"] == bond_filter]
+
+if year_filter != "Всі":
+    filtered = filtered[filtered["year"] == year_filter]
+
 monthly = filtered.groupby("month")["amount"].sum().reset_index()
 
 # -------------------------
@@ -153,29 +145,52 @@ col1.metric("Портфель", f"{total:,.0f} ₴")
 col2.metric("Річний дохід", f"{annual:,.0f} ₴")
 col3.metric("Сер. місяць", f"{avg:,.0f} ₴")
 
-# наступна виплата
 next_payment = events.sort_values("date").iloc[0]
 st.info(f"📅 Наступна виплата: {next_payment['date'].date()} → {next_payment['amount']:,.0f} ₴")
 
 # -------------------------
-# CASHFLOW CHART
+# VIEW SWITCH
 # -------------------------
-st.subheader("📈 Cashflow")
-st.line_chart(monthly.set_index("month"))
+view = st.radio(
+    "Режим",
+    ["📈 Графік", "📅 Виплати", "💼 Портфель"],
+    horizontal=True
+)
 
 # -------------------------
-# SCENARIO (Було vs Стало)
+# GRAPH
 # -------------------------
-st.subheader("🔮 Було vs Стало")
+if view == "📈 Графік":
+    st.line_chart(monthly.set_index("month"))
 
-qty_s = st.number_input("Кількість (сценарій)", 0)
-coupon_s = st.number_input("Купон (сценарій)", 0)
+# -------------------------
+# EVENTS TABLE
+# -------------------------
+elif view == "📅 Виплати":
+    st.dataframe(filtered.sort_values("date"))
 
-if st.button("Розрахувати сценарій"):
+# -------------------------
+# PORTFOLIO TABLE (EDIT + DELETE)
+# -------------------------
+elif view == "💼 Портфель":
 
-    added_year = qty_s * coupon_s * 2
-    st.success(f"+{added_year:,.0f} ₴ / рік")
+    st.subheader("Редагування портфеля")
 
-    monthly["new"] = monthly["amount"] + added_year / 12
+    edited = st.data_editor(
+        portfolio,
+        num_rows="dynamic",
+        use_container_width=True
+    )
 
-    st.line_chart(monthly.set_index("month")[["amount","new"]])
+    if st.button("💾 Зберегти зміни"):
+        save_data(edited)
+        st.success("Збережено")
+
+    st.subheader("Видалення")
+
+    to_delete = st.selectbox("Обери ОВДП", portfolio["name"])
+
+    if st.button("❌ Видалити"):
+        portfolio = portfolio[portfolio["name"] != to_delete]
+        save_data(portfolio)
+        st.warning("Видалено")
