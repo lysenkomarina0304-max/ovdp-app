@@ -28,13 +28,13 @@ def save_data(df):
 portfolio = load_data()
 
 # -------------------------
-# ADD
+# SIDEBAR
 # -------------------------
 st.sidebar.header("➕ Додати ОВДП")
 
 name = st.sidebar.text_input("Назва")
 qty = st.sidebar.number_input("Кількість", 0)
-coupon = st.sidebar.number_input("Купон", 0)
+coupon = st.sidebar.number_input("Купон", 0.0)
 d1 = st.sidebar.date_input("Дата 1")
 d2 = st.sidebar.date_input("Дата 2")
 mat = st.sidebar.date_input("Погашення")
@@ -65,9 +65,6 @@ if file:
     portfolio = df
     save_data(portfolio)
 
-# -------------------------
-# VALIDATION
-# -------------------------
 if portfolio.empty:
     st.warning("Додай ОВДП")
     st.stop()
@@ -79,38 +76,75 @@ def generate(df):
     events = []
 
     for _, b in df.iterrows():
-        if pd.isna(b["maturity"]) or pd.isna(b["date1"]) or pd.isna(b["date2"]):
+
+        if pd.isna(b["maturity"]) or pd.isna(b["date1"]):
             continue
 
         maturity = b["maturity"]
 
-        for start in [b["date1"], b["date2"]]:
-            d = start
+        # 🔶 КЕЙС 1: тільки 1 дата
+        if pd.isna(b["date2"]):
 
-            while d <= maturity:
+            d = b["date1"]
 
-                if d >= TODAY:
+            if d >= TODAY:
+                events.append({
+                    "date": d,
+                    "name": b["name"],
+                    "type": "coupon",
+                    "amount": b["coupon"] * b["quantity"],
+                    "principal": 0
+                })
 
-                    # купон
-                    events.append({
-                        "date": d,
-                        "name": b["name"],
-                        "type": "coupon",
-                        "amount": b["coupon"] * b["quantity"],
-                        "principal": 0
-                    })
+            if maturity >= TODAY:
+                events.append({
+                    "date": maturity,
+                    "name": b["name"],
+                    "type": "maturity",
+                    "amount": 0,
+                    "principal": b["nominal"] * b["quantity"]
+                })
 
-                    # погашення
-                    if d == maturity:
+        # 🔶 КЕЙС 2: 2 дати
+        else:
+
+            dates = []
+
+            if pd.notna(b["date1"]):
+                dates.append(b["date1"])
+
+            if pd.notna(b["date2"]) and b["date2"] != b["date1"]:
+                dates.append(b["date2"])
+
+            for start in dates:
+
+                d = start
+
+                while d <= maturity:
+
+                    if d >= TODAY:
+
+                        if d == maturity and start != min(dates):
+                            break
+
                         events.append({
                             "date": d,
                             "name": b["name"],
-                            "type": "maturity",
-                            "amount": 0,
-                            "principal": b["nominal"] * b["quantity"]
+                            "type": "coupon",
+                            "amount": b["coupon"] * b["quantity"],
+                            "principal": 0
                         })
 
-                d += relativedelta(months=6)
+                        if d == maturity:
+                            events.append({
+                                "date": d,
+                                "name": b["name"],
+                                "type": "maturity",
+                                "amount": 0,
+                                "principal": b["nominal"] * b["quantity"]
+                            })
+
+                    d += relativedelta(months=6)
 
     return pd.DataFrame(events)
 
@@ -131,7 +165,7 @@ principal = events[events["type"] == "maturity"]
 monthly_income = income.groupby("month")["amount"].sum().reset_index()
 
 # -------------------------
-# GAP GRAPH (важливо)
+# GAP GRAPH
 # -------------------------
 all_months = pd.date_range(
     start=events["date"].min(),
@@ -152,10 +186,33 @@ total = (portfolio["nominal"] * portfolio["quantity"]).sum()
 annual = monthly_income["amount"].sum()
 avg = annual / 12
 
-c1,c2,c3 = st.columns(3)
+# 🔥 НОВИЙ KPI
+six_months = TODAY + relativedelta(months=6)
+twelve_months = TODAY + relativedelta(months=12)
+
+maturing_6 = portfolio[
+    (portfolio["maturity"] >= TODAY) &
+    (portfolio["maturity"] <= six_months)
+]
+
+maturing_12 = portfolio[
+    (portfolio["maturity"] >= TODAY) &
+    (portfolio["maturity"] <= twelve_months)
+]
+
+sum_6 = (maturing_6["nominal"] * maturing_6["quantity"]).sum()
+sum_12 = (maturing_12["nominal"] * maturing_12["quantity"]).sum()
+
+pct_6 = (sum_6 / total * 100) if total else 0
+pct_12 = (sum_12 / total * 100) if total else 0
+
+c1,c2,c3,c4,c5 = st.columns(5)
+
 c1.metric("Портфель", f"{total:,.0f} ₴")
 c2.metric("Річний дохід", f"{annual:,.0f} ₴")
 c3.metric("Сер. місяць", f"{avg:,.0f} ₴")
+c4.metric("⏳ Погашення 6м", f"{pct_6:.1f}%")
+c5.metric("⏳ Погашення 12м", f"{pct_12:.1f}%")
 
 # -------------------------
 # VIEW
@@ -164,27 +221,15 @@ view = st.radio("Режим",
     ["📈 Дохід", "📊 Провали", "📅 Виплати", "💼 Портфель"],
     horizontal=True)
 
-# -------------------------
-# GRAPH 1 (дохід)
-# -------------------------
 if view == "📈 Дохід":
     st.line_chart(monthly_income.set_index("month"))
 
-# -------------------------
-# GRAPH 2 (провали)
-# -------------------------
 elif view == "📊 Провали":
     st.bar_chart(gap_df.set_index("month"))
 
-# -------------------------
-# EVENTS
-# -------------------------
 elif view == "📅 Виплати":
     st.dataframe(events.sort_values("date"))
 
-# -------------------------
-# PORTFOLIO
-# -------------------------
 elif view == "💼 Портфель":
 
     edited = st.data_editor(portfolio, num_rows="dynamic")
